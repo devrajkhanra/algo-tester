@@ -107,8 +107,8 @@ export function calculateADX(data: CandleData[], length: number = 14): ADXResult
   return results;
 }
 
-export function applyIndicator(data: CandleData[]) {
-  const adxResults = calculateADX(data, 14);
+export function applyIndicator(data: CandleData[], adxLength: number = 14) {
+  const adxResults = calculateADX(data, adxLength);
   
   for (let i = 0; i < data.length; i++) {
     data[i].diPlus = adxResults[i].diPlus;

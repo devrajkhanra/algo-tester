@@ -1,11 +1,39 @@
 'use client';
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useDropzone } from 'react-dropzone';
 import axios from 'axios';
 import Papa from 'papaparse';
 import { createChart, ColorType } from 'lightweight-charts';
+import { calculateADX } from './indicator';
 
-const CandlestickChart: React.FC<any> = ({ data = [], markers = [], lines, theme, pickMode, onPick, chartActionsRef }) => {
+function usePersistentState<T>(key: string, defaultValue: T) {
+  const [value, setValue] = useState<T>(defaultValue);
+  const [hydrated, setHydrated] = useState(false);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (raw !== null) setValue(JSON.parse(raw) as T);
+    } catch {
+      // ignore malformed storage and keep defaults
+    } finally {
+      setHydrated(true);
+    }
+  }, [key]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // ignore storage write failures
+    }
+  }, [hydrated, key, value]);
+
+  return [value, setValue, hydrated] as const;
+}
+
+const CandlestickChart: React.FC<any> = ({ data = [], markers = [], lines, theme, pickMode, onPick, chartActionsRef, showRangeLines = true }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const indicatorContainerRef = useRef<HTMLDivElement>(null);
   const chartInstanceRef = useRef<any>(null);
@@ -29,11 +57,28 @@ const CandlestickChart: React.FC<any> = ({ data = [], markers = [], lines, theme
     const gridColor = isDark ? '#333333' : '#e5e7eb';
     const textColor = isDark ? '#9ca3af' : '#374151';
 
+    const formatTick = (time: any, tickMarkType: any) => {
+      const ts = typeof time === 'number' ? time : Number(time);
+      if (!Number.isFinite(ts)) return '';
+      const d = new Date(ts * 1000);
+      if (tickMarkType === 0 || tickMarkType === 1) {
+        // Show date blocks like "29 Apr"
+        return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+      }
+      return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+    };
+
     const chartOptions = {
       layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor },
       grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
       rightPriceScale: { visible: true, borderColor: gridColor },
-      timeScale: { visible: true, borderColor: gridColor },
+      timeScale: {
+        visible: true,
+        borderColor: gridColor,
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: formatTick,
+      },
     };
 
     const chart = createChart(chartContainerRef.current, {
@@ -60,7 +105,10 @@ const CandlestickChart: React.FC<any> = ({ data = [], markers = [], lines, theme
     candlestickSeriesRef.current = candlestickSeries;
     candlestickSeries.setData(data);
 
-    if (markers && markers.length > 0) candlestickSeries.setMarkers(markers);
+    if (markers && markers.length > 0) {
+      const sortedMarkers = [...markers].sort((a, b) => Number(a.time) - Number(b.time));
+      candlestickSeries.setMarkers(sortedMarkers);
+    }
 
     const indicatorChart = createChart(indicatorContainerRef.current, {
       ...chartOptions,
@@ -68,6 +116,27 @@ const CandlestickChart: React.FC<any> = ({ data = [], markers = [], lines, theme
       height: 200,
     });
     indicatorInstanceRef.current = indicatorChart;
+
+    if (showRangeLines && lines?.rangeHigh && lines.rangeHigh.length > 0) {
+      const rangeHighSeries = chart.addLineSeries({ color: '#60a5fa', lineWidth: 2, lineStyle: 2, title: 'Range High' });
+      rangeHighSeries.setData(lines.rangeHigh);
+      (rangeHighSeries as any).applyOptions({
+        lastValueVisible: false,
+        priceLineVisible: false,
+        crosshairMarkerVisible: false,
+        autoscaleInfoProvider: () => null,
+      });
+    }
+    if (showRangeLines && lines?.rangeLow && lines.rangeLow.length > 0) {
+      const rangeLowSeries = chart.addLineSeries({ color: '#60a5fa', lineWidth: 2, lineStyle: 2, title: 'Range Low' });
+      rangeLowSeries.setData(lines.rangeLow);
+      (rangeLowSeries as any).applyOptions({
+        lastValueVisible: false,
+        priceLineVisible: false,
+        crosshairMarkerVisible: false,
+        autoscaleInfoProvider: () => null,
+      });
+    }
 
     if (lines?.adx && lines.adx.length > 0) {
       const adxSeries = indicatorChart.addLineSeries({ color: '#8b5cf6', lineWidth: 1, title: 'ADX' });
@@ -183,7 +252,7 @@ const CandlestickChart: React.FC<any> = ({ data = [], markers = [], lines, theme
       chart.remove(); 
       indicatorChart.remove();
     };
-  }, [data, markers, lines, theme]);
+  }, [data, markers, lines, theme, showRangeLines]);
 
   return (
     <div className={`flex flex-col gap-0 border border-current ${pickMode ? 'cursor-crosshair' : ''}`}>
@@ -194,7 +263,7 @@ const CandlestickChart: React.FC<any> = ({ data = [], markers = [], lines, theme
 };
 
 export default function Dashboard() {
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [theme, setTheme, themeHydrated] = usePersistentState<'dark' | 'light'>('algoTester.theme', 'dark');
   const [csvFile, setCsvFile] = useState<File | null>(null);
 
   type Snapshot = {
@@ -210,35 +279,106 @@ export default function Dashboard() {
     threshold: number | null;
   };
   type Rule = { id: string; left: string; operator: string; right: string; occurrence: 'any' | '1st' | '2nd' | '3rd'; };
+  type ScenarioChain = {
+    id: string;
+    name: string;
+    indicator: 'adx' | 'diPlus' | 'diMinus';
+    crossThreshold: number;
+    breakoutDirection: 'above' | 'below' | 'either';
+    enabled: boolean;
+  };
 
-  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [snapshots, setSnapshots] = usePersistentState<Snapshot[]>('algoTester.snapshots', []);
   const [pickMode, setPickMode] = useState(false);
   const [pendingPick, setPendingPick] = useState<Omit<Snapshot,'id'|'name'> | null>(null);
   const [pendingName, setPendingName] = useState('');
-  const [pickIndicator, setPickIndicator] = useState<'adx' | 'diPlus' | 'diMinus'>('adx');
-  const [pickCondition, setPickCondition] = useState<string>('Peak');
-  const [pickThreshold, setPickThreshold] = useState<number>(20);
+  const [pickIndicator, setPickIndicator] = usePersistentState<'adx' | 'diPlus' | 'diMinus'>('algoTester.pickIndicator', 'adx');
+  const [pickCondition, setPickCondition] = usePersistentState<string>('algoTester.pickCondition', 'Peak');
+  const [pickThreshold, setPickThreshold] = usePersistentState<number>('algoTester.pickThreshold', 20);
 
-  const [snapDayType, setSnapDayType] = useState<'absolute' | 'offset'>('absolute');
-  const [snapDayOffset, setSnapDayOffset] = useState<number>(0);
+  const [snapDayType, setSnapDayType] = usePersistentState<'absolute' | 'offset'>('algoTester.snapDayType', 'absolute');
+  const [snapDayOffset, setSnapDayOffset] = usePersistentState<number>('algoTester.snapDayOffset', 0);
 
-  const [rules, setRules] = useState<Rule[]>([
+  const defaultRules: Rule[] = [
     { id: '1', left: 'row.diPlus', operator: '>', right: 'row.diMinus', occurrence: 'any' },
     { id: '2', left: 'row.adx', operator: '>', right: '25', occurrence: 'any' }
-  ]);
+  ];
+  const defaultChains: ScenarioChain[] = [
+    { id: 'chain_1', name: 'diPlusCross20RangeBreak', indicator: 'diPlus', crossThreshold: 20, breakoutDirection: 'either', enabled: true }
+  ];
+  type StrategyProfile = {
+    id: string;
+    name: string;
+    rules: Rule[];
+    scenarioChains: ScenarioChain[];
+    maxTradesPerDay: string;
+    adxLength: number;
+    showRangeLines: boolean;
+  };
+  const [rules, setRules] = usePersistentState<Rule[]>('algoTester.rules', defaultRules);
   const operators = ['>', '<', '>=', '<=', '==', '!='];
 
   const chartActionsRef = useRef<any>(null);
-  const [maxTradesPerDay, setMaxTradesPerDay] = useState<string>('');
-  const [baseChartData, setBaseChartData] = useState<any[] | null>(null);
-  const [results, setResults] = useState<any | null>(null);
+  const [maxTradesPerDay, setMaxTradesPerDay] = usePersistentState<string>('algoTester.maxTradesPerDay', '');
+  const [adxLength, setAdxLength] = usePersistentState<number>('algoTester.adxLength', 14);
+  const [showRangeLines, setShowRangeLines] = usePersistentState<boolean>('algoTester.showRangeLines', true);
+  const [baseChartData, setBaseChartData] = usePersistentState<any[] | null>('algoTester.baseChartData', null);
+  const [results, setResults] = usePersistentState<any | null>('algoTester.lastResults', null);
   const [loading, setLoading] = useState<boolean>(false);
+  const [scenarioChains, setScenarioChains] = usePersistentState<ScenarioChain[]>('algoTester.scenarioChains', defaultChains);
+  const [strategyProfiles, setStrategyProfiles] = usePersistentState<StrategyProfile[]>('algoTester.strategyProfiles', [
+    { id: 'strategy_1', name: 'Strategy 1', rules: defaultRules, scenarioChains: defaultChains, maxTradesPerDay: '', adxLength: 14, showRangeLines: true }
+  ]);
+  const [activeStrategyId, setActiveStrategyId] = usePersistentState<string>('algoTester.activeStrategyId', 'strategy_1');
+  const [strategyNameDraft, setStrategyNameDraft] = useState('');
+  const sanitizeChainName = (name: string) => name.replace(/[^\w]/g, '_');
+
+  useEffect(() => {
+    const active = strategyProfiles.find(s => s.id === activeStrategyId);
+    if (!active) return;
+    setRules(active.rules || defaultRules);
+    setScenarioChains(active.scenarioChains || defaultChains);
+    setMaxTradesPerDay(active.maxTradesPerDay || '');
+    setAdxLength(active.adxLength || 14);
+    setShowRangeLines(active.showRangeLines !== false);
+    setStrategyNameDraft(active.name || '');
+  }, [activeStrategyId]);
+
+  useEffect(() => {
+    setStrategyProfiles(prev => prev.map(s => s.id === activeStrategyId ? {
+      ...s,
+      rules,
+      scenarioChains,
+      maxTradesPerDay,
+      adxLength,
+      showRangeLines,
+    } : s));
+  }, [rules, scenarioChains, maxTradesPerDay, adxLength, showRangeLines, activeStrategyId]);
 
   // Autocomplete suggestions for free-form inputs
   const suggestedVars = snapshots.flatMap(s => [
     `snap.${s.name}_Open`,`snap.${s.name}_High`,`snap.${s.name}_Low`,`snap.${s.name}_Close`,
     `snap.${s.name}_adx`,`snap.${s.name}_diPlus`,`snap.${s.name}_diMinus`,
   ]);
+  const chainVars = scenarioChains.flatMap((chain) => {
+    const base = `row.chain_${sanitizeChainName(chain.name)}`;
+    return [
+      `${base}_triggerClose`,
+      `${base}_prevPeakClose`,
+      `${base}_rangeHigh`,
+      `${base}_rangeLow`,
+      `${base}_breakoutClose`,
+      `${base}_breakoutUp`,
+      `${base}_breakoutDown`,
+      `${base}_completed`,
+    ];
+  });
+  const firstSignalVars = [
+    'row.chainFirstSignal',
+    'row.chainFirstSignalBuy',
+    'row.chainFirstSignalSell',
+  ];
+  const allSuggestedVars = [...suggestedVars, ...chainVars, ...firstSignalVars];
 
   const getSimpleLabel = (s: Snapshot, prop: string) => {
     let ind = s.indicator === 'diPlus' ? 'DI+' : s.indicator === 'diMinus' ? 'DI-' : 'ADX';
@@ -312,8 +452,9 @@ export default function Dashboard() {
     const formData = new FormData();
     formData.append('csv_file', csvFile);
     // Free-form rules: left operator right
-    const compiledCondition = rules.length > 0
-      ? rules.map((r, idx) => {
+    const validRules = rules.filter(r => (r.left || '').trim() !== '' && (r.right || '').trim() !== '');
+    const compiledCondition = validRules.length > 0
+      ? validRules.map((r, idx) => {
           const baseExpr = `(${r.left || 'true'} ${r.operator} ${r.right || 'true'})`;
           if (r.occurrence === 'any') return baseExpr;
           const occIndex = r.occurrence === '1st' ? 0 : r.occurrence === '2nd' ? 1 : 2;
@@ -329,9 +470,11 @@ export default function Dashboard() {
             return false;
           })()`;
         }).join(' && ')
-      : 'true';
+      : 'false';
     formData.append('condition', compiledCondition);
     formData.append('snapshots', JSON.stringify(snapshots.map(s => ({ name: s.name, timestamp: s.timestamp }))));
+    formData.append('scenarioChains', JSON.stringify(scenarioChains.filter(c => c.enabled)));
+    formData.append('adxLength', String(adxLength));
     if (maxTradesPerDay) formData.append('maxTradesPerDay', maxTradesPerDay);
     try {
       const response = await axios.post('/api/backtest', formData);
@@ -344,6 +487,27 @@ export default function Dashboard() {
   };
 
   const chartDataToDisplay = results ? results.chartData : (baseChartData || []);
+  const persistedIndicatorLines = useMemo(() => {
+    if (!baseChartData || baseChartData.length === 0) return null;
+    const candles = baseChartData.map((r: any) => ({
+      High: Number(r.high),
+      Low: Number(r.low),
+      Close: Number(r.close),
+    }));
+    const adx = calculateADX(candles, adxLength);
+    return {
+      adx: adx
+        .map((v, i) => (v.adx === null || Number.isNaN(Number(v.adx)) ? null : { time: baseChartData[i].time, value: Number(v.adx) }))
+        .filter((x: any) => x !== null),
+      diPlus: adx
+        .map((v, i) => (Number.isNaN(Number(v.diPlus)) ? null : { time: baseChartData[i].time, value: Number(v.diPlus) }))
+        .filter((x: any) => x !== null),
+      diMinus: adx
+        .map((v, i) => (Number.isNaN(Number(v.diMinus)) ? null : { time: baseChartData[i].time, value: Number(v.diMinus) }))
+        .filter((x: any) => x !== null),
+    };
+  }, [baseChartData, adxLength]);
+  const linesToDisplay = results?.lines || persistedIndicatorLines;
 
   const isDark = theme === 'dark';
   const bgClass = isDark ? 'bg-[#0a0a0a]' : 'bg-[#f3f4f6]';
@@ -351,6 +515,8 @@ export default function Dashboard() {
   const panelBg = isDark ? 'bg-[#111111]' : 'bg-white';
   const borderClass = isDark ? 'border-[#333333]' : 'border-gray-300';
   const inputBg = isDark ? 'bg-[#1a1a1a]' : 'bg-white';
+
+  if (!themeHydrated) return null;
 
   return (
     <div className={`min-h-screen ${bgClass} ${textClass} p-4 md:p-8 font-sans transition-colors duration-200`}>
@@ -399,10 +565,74 @@ export default function Dashboard() {
                 </div>
 
                 <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest mb-2 text-gray-500">Strategy</label>
+                  <div className={`p-2 border ${borderClass} ${inputBg} space-y-2`}>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={activeStrategyId}
+                        onChange={(e) => setActiveStrategyId(e.target.value)}
+                        className={`flex-1 p-1 border ${borderClass} bg-transparent text-xs`}
+                      >
+                        {strategyProfiles.map((s) => (
+                          <option key={s.id} value={s.id}>{s.name}</option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={() => {
+                          const id = `strategy_${Date.now()}`;
+                          const name = `Strategy ${strategyProfiles.length + 1}`;
+                          const next: StrategyProfile = { id, name, rules: [...defaultRules], scenarioChains: [...defaultChains], maxTradesPerDay: '', adxLength: 14, showRangeLines: true };
+                          setStrategyProfiles(prev => [...prev, next]);
+                          setActiveStrategyId(id);
+                        }}
+                        className={`px-2 py-1 text-[10px] border ${borderClass} hover:bg-gray-500 hover:text-white transition-colors`}
+                      >
+                        + New
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (strategyProfiles.length <= 1) return;
+                          const filtered = strategyProfiles.filter(s => s.id !== activeStrategyId);
+                          setStrategyProfiles(filtered);
+                          setActiveStrategyId(filtered[0].id);
+                        }}
+                        className="px-2 py-1 text-[10px] text-red-500 border border-transparent hover:border-red-500 hover:bg-red-500 hover:text-white transition-colors"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={strategyNameDraft}
+                        onChange={(e) => setStrategyNameDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key !== 'Enter') return;
+                          const nextName = strategyNameDraft.trim();
+                          if (!nextName) return;
+                          setStrategyProfiles(prev => prev.map(s => s.id === activeStrategyId ? { ...s, name: nextName } : s));
+                        }}
+                        className={`flex-1 p-1 border ${borderClass} bg-transparent text-xs font-mono focus:outline-none`}
+                        placeholder="Rename current strategy"
+                      />
+                      <button
+                        onClick={() => {
+                          const nextName = strategyNameDraft.trim();
+                          if (!nextName) return;
+                          setStrategyProfiles(prev => prev.map(s => s.id === activeStrategyId ? { ...s, name: nextName } : s));
+                        }}
+                        className={`px-2 py-1 text-[10px] border ${borderClass} hover:bg-blue-600 hover:text-white transition-colors`}
+                      >
+                        Rename
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
                   <label className="block text-[10px] font-bold uppercase tracking-widest mb-2 text-gray-500">Buy Conditions (AND)</label>
                   {/* Datalist for autocomplete */}
                   <datalist id="vars-list">
-                    {suggestedVars.map(v => <option key={v} value={v} />)}
+                    {allSuggestedVars.map(v => <option key={v} value={v} />)}
                   </datalist>
                   <div className="space-y-2">
                     {rules.map((rule, idx) => (
@@ -423,6 +653,23 @@ export default function Dashboard() {
                                 ))}
                               </optgroup>
                             ))}
+                            {scenarioChains.map((chain) => (
+                              <optgroup key={chain.id} label={`chain.${chain.name}`}>
+                                <option value={`row.chain_${sanitizeChainName(chain.name)}_triggerClose`}>Trigger candle close</option>
+                                <option value={`row.chain_${sanitizeChainName(chain.name)}_prevPeakClose`}>Previous peak candle close</option>
+                                <option value={`row.chain_${sanitizeChainName(chain.name)}_rangeHigh`}>Range high</option>
+                                <option value={`row.chain_${sanitizeChainName(chain.name)}_rangeLow`}>Range low</option>
+                                <option value={`row.chain_${sanitizeChainName(chain.name)}_breakoutClose`}>Breakout candle close</option>
+                                <option value={`row.chain_${sanitizeChainName(chain.name)}_breakoutUp`}>Breakout above (bool)</option>
+                                <option value={`row.chain_${sanitizeChainName(chain.name)}_breakoutDown`}>Breakout below (bool)</option>
+                                <option value={`row.chain_${sanitizeChainName(chain.name)}_completed`}>Chain completed (bool)</option>
+                              </optgroup>
+                            ))}
+                            <optgroup label="chain.firstTrigger">
+                              <option value="row.chainFirstSignal">First signal side (BUY/SELL)</option>
+                              <option value="row.chainFirstSignalBuy">First signal is BUY (bool)</option>
+                              <option value="row.chainFirstSignalSell">First signal is SELL (bool)</option>
+                            </optgroup>
                           </select>
 
                           <select
@@ -471,6 +718,106 @@ export default function Dashboard() {
                 </div>
 
                 <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest mb-2 text-gray-500">Scenario Chains</label>
+                  <div className={`p-2 border ${borderClass} ${inputBg} space-y-2`}>
+                    {scenarioChains.map((chain, idx) => (
+                      <div key={chain.id} className={`p-2 border ${borderClass} space-y-2`}>
+                        <div className="flex items-center justify-between">
+                          <input
+                            value={chain.name}
+                            onChange={(e) => {
+                              const next = [...scenarioChains];
+                              next[idx].name = e.target.value.replace(/\s+/g, '_');
+                              setScenarioChains(next);
+                            }}
+                            className={`flex-1 p-1 border ${borderClass} bg-transparent text-xs font-mono focus:outline-none`}
+                            placeholder="chain_name"
+                          />
+                          <label className="ml-2 text-[10px] flex items-center gap-1">
+                            <input
+                              type="checkbox"
+                              checked={chain.enabled}
+                              onChange={(e) => {
+                                const next = [...scenarioChains];
+                                next[idx].enabled = e.target.checked;
+                                setScenarioChains(next);
+                              }}
+                            />
+                            Enable
+                          </label>
+                          <button
+                            onClick={() => setScenarioChains(prev => prev.filter(c => c.id !== chain.id))}
+                            className="ml-2 px-2 py-1 text-[10px] text-red-500 border border-transparent hover:border-red-500 hover:bg-red-500 hover:text-white transition-colors"
+                            title="Remove chain"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-3 gap-1">
+                          <select
+                            value={chain.indicator}
+                            onChange={(e: any) => {
+                              const next = [...scenarioChains];
+                              next[idx].indicator = e.target.value;
+                              setScenarioChains(next);
+                            }}
+                            className={`p-1 border ${borderClass} bg-transparent text-[10px]`}
+                          >
+                            <option value="adx">ADX</option>
+                            <option value="diPlus">DI+</option>
+                            <option value="diMinus">DI-</option>
+                          </select>
+                          <input
+                            type="number"
+                            value={chain.crossThreshold}
+                            onChange={(e) => {
+                              const next = [...scenarioChains];
+                              next[idx].crossThreshold = parseFloat(e.target.value) || 0;
+                              setScenarioChains(next);
+                            }}
+                            className={`p-1 border ${borderClass} bg-transparent text-[10px] font-mono`}
+                            placeholder="Cross"
+                          />
+                          <select
+                            value={chain.breakoutDirection}
+                            onChange={(e: any) => {
+                              const next = [...scenarioChains];
+                              next[idx].breakoutDirection = e.target.value;
+                              setScenarioChains(next);
+                            }}
+                            className={`p-1 border ${borderClass} bg-transparent text-[10px]`}
+                          >
+                            <option value="either">Break Either</option>
+                            <option value="above">Break Above</option>
+                            <option value="below">Break Below</option>
+                          </select>
+                        </div>
+                      </div>
+                    ))}
+                    <button
+                      onClick={() => setScenarioChains(prev => [...prev, { id: Date.now().toString(), name: `chain_${prev.length + 1}`, indicator: 'diPlus', crossThreshold: 20, breakoutDirection: 'either', enabled: true }])}
+                      className={`w-full p-1 text-[10px] font-bold uppercase tracking-widest border ${borderClass} hover:bg-gray-500 hover:text-white transition-colors`}
+                    >
+                      + Add Chain
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest mb-1 text-gray-500">Indicator Settings</label>
+                  <div className={`p-2 border ${borderClass} ${inputBg} flex items-center justify-between`}>
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-gray-500">ADX Length</span>
+                    <input
+                      type="number"
+                      min="2"
+                      value={adxLength}
+                      onChange={(e) => setAdxLength(Math.max(2, parseInt(e.target.value || '14', 10) || 14))}
+                      className={`w-20 p-1 border ${borderClass} bg-transparent text-xs font-mono focus:outline-none`}
+                    />
+                  </div>
+                </div>
+
+                <div>
                   <label className="block text-[10px] font-bold uppercase tracking-widest mb-1 text-gray-500">Max Trades/Day</label>
                   <input 
                     type="number" 
@@ -480,6 +827,16 @@ export default function Dashboard() {
                     className={`w-full p-2 border ${borderClass} ${inputBg} text-xs font-mono focus:outline-none focus:border-blue-500`}
                     placeholder="Unlimited" 
                   />
+                </div>
+                <div className={`p-2 border ${borderClass} ${inputBg}`}>
+                  <label className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={showRangeLines}
+                      onChange={(e) => setShowRangeLines(e.target.checked)}
+                    />
+                    Show Parallel Lines
+                  </label>
                 </div>
 
                 <button 
@@ -695,7 +1052,7 @@ export default function Dashboard() {
                 </div>
               </div>
               <div className={borderClass}>
-                <CandlestickChart data={chartDataToDisplay} markers={results?.markers} lines={results?.lines} theme={theme} pickMode={pickMode} onPick={handlePick} chartActionsRef={chartActionsRef} />
+                <CandlestickChart data={chartDataToDisplay} markers={results?.markers} lines={linesToDisplay} theme={theme} pickMode={pickMode} onPick={handlePick} chartActionsRef={chartActionsRef} showRangeLines={showRangeLines} />
               </div>
             </div>
           </main>
