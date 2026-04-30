@@ -1,6 +1,6 @@
 'use client';
 import React, { useEffect, useRef } from 'react';
-import { createChart, ColorType, Time, SeriesMarker } from 'lightweight-charts';
+import { createChart, ColorType, Time, SeriesMarker, CrosshairMode } from 'lightweight-charts';
 
 export interface CandlestickData {
   time: Time;
@@ -43,6 +43,9 @@ const CandlestickChart: React.FC<CandlestickChartProps> = ({ data, markers, line
       grid: { vertLines: { color: '#eee' }, horzLines: { color: '#eee' } },
       leftPriceScale: { visible: true, borderColor: '#eee' },
       rightPriceScale: { visible: true, borderColor: '#eee' },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+      },
     });
 
     const candlestickSeries = chart.addCandlestickSeries({

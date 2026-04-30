@@ -99,11 +99,25 @@ const CandlestickChart: React.FC<any> = ({ data = [], markers = [], lines, theme
       };
     }
 
+    const prepareSeriesData = (arr: any[]) => {
+      if (!arr || !arr.length) return [];
+      const sorted = [...arr].sort((a: any, b: any) => Number(a.time) - Number(b.time));
+      const unique = [];
+      for (let i = 0; i < sorted.length; i++) {
+        if (i === 0 || sorted[i].time !== sorted[i-1].time) {
+          unique.push(sorted[i]);
+        } else {
+          unique[unique.length - 1] = sorted[i]; // overwrite duplicate with latest
+        }
+      }
+      return unique;
+    };
+
     const candlestickSeries = chart.addCandlestickSeries({
       upColor: '#16a34a', downColor: '#dc2626', borderVisible: false, wickUpColor: '#16a34a', wickDownColor: '#dc2626',
     });
     candlestickSeriesRef.current = candlestickSeries;
-    candlestickSeries.setData(data);
+    candlestickSeries.setData(prepareSeriesData(data));
 
     if (markers && markers.length > 0) {
       const sortedMarkers = [...markers].sort((a, b) => Number(a.time) - Number(b.time));
@@ -119,7 +133,7 @@ const CandlestickChart: React.FC<any> = ({ data = [], markers = [], lines, theme
 
     if (showRangeLines && lines?.rangeHigh && lines.rangeHigh.length > 0) {
       const rangeHighSeries = chart.addLineSeries({ color: '#60a5fa', lineWidth: 2, lineStyle: 2, title: 'Range High' });
-      rangeHighSeries.setData(lines.rangeHigh);
+      rangeHighSeries.setData(prepareSeriesData(lines.rangeHigh));
       (rangeHighSeries as any).applyOptions({
         lastValueVisible: false,
         priceLineVisible: false,
@@ -129,7 +143,7 @@ const CandlestickChart: React.FC<any> = ({ data = [], markers = [], lines, theme
     }
     if (showRangeLines && lines?.rangeLow && lines.rangeLow.length > 0) {
       const rangeLowSeries = chart.addLineSeries({ color: '#60a5fa', lineWidth: 2, lineStyle: 2, title: 'Range Low' });
-      rangeLowSeries.setData(lines.rangeLow);
+      rangeLowSeries.setData(prepareSeriesData(lines.rangeLow));
       (rangeLowSeries as any).applyOptions({
         lastValueVisible: false,
         priceLineVisible: false,
@@ -141,17 +155,17 @@ const CandlestickChart: React.FC<any> = ({ data = [], markers = [], lines, theme
     if (lines?.adx && lines.adx.length > 0) {
       const adxSeries = indicatorChart.addLineSeries({ color: '#8b5cf6', lineWidth: 1, title: 'ADX' });
       adxSeriesRef.current = adxSeries;
-      adxSeries.setData(lines.adx);
+      adxSeries.setData(prepareSeriesData(lines.adx));
     }
     
     if (lines?.diPlus && lines.diPlus.length > 0) {
       const diPlusSeries = indicatorChart.addLineSeries({ color: '#16a34a', lineWidth: 1, title: 'DI+' });
-      diPlusSeries.setData(lines.diPlus);
+      diPlusSeries.setData(prepareSeriesData(lines.diPlus));
     }
 
     if (lines?.diMinus && lines.diMinus.length > 0) {
       const diMinusSeries = indicatorChart.addLineSeries({ color: '#dc2626', lineWidth: 1, title: 'DI-' });
-      diMinusSeries.setData(lines.diMinus);
+      diMinusSeries.setData(prepareSeriesData(lines.diMinus));
     }
 
     let isSyncing = false;
@@ -439,7 +453,16 @@ export default function Dashboard() {
             open: row.Open, high: row.High, low: row.Low, close: row.Close
           })).filter((row: any) => !isNaN(row.time));
           formattedData.sort((a: any, b: any) => a.time - b.time);
-          setBaseChartData(formattedData);
+          
+          const uniqueData = [];
+          for (let i = 0; i < formattedData.length; i++) {
+            if (i === 0 || formattedData[i].time !== formattedData[i-1].time) {
+              uniqueData.push(formattedData[i]);
+            } else {
+              uniqueData[uniqueData.length - 1] = formattedData[i];
+            }
+          }
+          setBaseChartData(uniqueData);
         }
       });
     }
